@@ -1,0 +1,4 @@
+quart==0.19.4
+camoufox==2.6.1
+patchright==1.0.6
+playwright==1.42.0
