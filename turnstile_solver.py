@@ -7,8 +7,18 @@ import logging
 import asyncio
 import argparse
 from quart import Quart, request, jsonify
-from camoufox.async_api import AsyncCamoufox
-from patchright.async_api import async_playwright
+
+
+# Import Playwright with fallback for headless environments
+try:
+    from patchright.async_api import async_playwright
+except ImportError:
+    from playwright.async_api import async_playwright
+
+try:
+    from camoufox.async_api import AsyncCamoufox
+except ImportError:
+    AsyncCamoufox = None
 
 
 COLORS = {
@@ -109,7 +119,7 @@ class TurnstileAPIServer:
     async def health_check(self):
         """Health check endpoint for Railway."""
         return jsonify({
-            "status": "healthy",
+            "status": "healthy" if self.initialized else "initializing",
             "browser_pool_size": self.browser_pool.qsize(),
             "browser_type": self.browser_type,
             "headless": self.headless,
@@ -134,24 +144,25 @@ class TurnstileAPIServer:
         if self.browser_type in ['chromium', 'chrome', 'msedge']:
             self.playwright_instance = await async_playwright().start()
             playwright = self.playwright_instance
-        elif self.browser_type == "camoufox":
+        elif self.browser_type == "camoufox" and AsyncCamoufox:
             self.camoufox_instance = AsyncCamoufox(headless=self.headless)
 
         for i in range(self.thread_count):
             try:
                 if self.browser_type in ['chromium', 'chrome', 'msedge']:
                     browser = await playwright.chromium.launch(
-                        channel=self.browser_type,
+                        channel=self.browser_type if self.browser_type != 'chromium' else None,
                         headless=self.headless,
                         args=self.browser_args + [
                             '--no-sandbox',
                             '--disable-setuid-sandbox',
                             '--disable-dev-shm-usage',
                             '--disable-accelerated-2d-canvas',
-                            '--disable-gpu'
+                            '--disable-gpu',
+                            '--disable-blink-features=AutomationControlled'
                         ]
                     )
-                elif self.browser_type == "camoufox":
+                elif self.browser_type == "camoufox" and self.camoufox_instance:
                     browser = await self.camoufox_instance.start()
 
                 await self.browser_pool.put((i + 1, browser))
