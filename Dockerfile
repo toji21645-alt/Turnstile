@@ -1,18 +1,18 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies for Playwright
+# Install system dependencies for Playwright on Debian Bookworm (stable)
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright dependencies
-RUN pip install playwright==1.42.0 && \
+# Install Playwright with dependencies using the official method
+RUN pip install --no-cache-dir playwright==1.42.0 && \
     playwright install chromium && \
-    playwright install-deps
+    playwright install-deps chromium
 
 # Copy requirements first for better caching
 COPY requirements.txt .
