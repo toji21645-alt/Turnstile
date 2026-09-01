@@ -86,12 +86,14 @@ class TurnstileAPIServer:
         self.browser_type = browser_type
         self.headless = headless
         self.useragent = useragent
-        self.thread_count = max(1, min(thread, 10))  # Limit threads for Railway
+        self.thread_count = max(1, min(thread, 10))
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
         self.browser_args = []
         self.playwright_instance = None
         self.camoufox_instance = None
+        self.initialized = False
+        
         if useragent:
             self.browser_args.append(f"--user-agent={useragent}")
 
@@ -111,7 +113,8 @@ class TurnstileAPIServer:
             "browser_pool_size": self.browser_pool.qsize(),
             "browser_type": self.browser_type,
             "headless": self.headless,
-            "thread_count": self.thread_count
+            "thread_count": self.thread_count,
+            "initialized": self.initialized
         })
 
     async def _startup(self) -> None:
@@ -119,12 +122,15 @@ class TurnstileAPIServer:
         logger.info("Starting browser initialization")
         try:
             await self._initialize_browser()
+            self.initialized = True
         except Exception as e:
             logger.error(f"Failed to initialize browser: {str(e)}")
             raise
 
     async def _initialize_browser(self) -> None:
         """Initialize the browser and create the page pool."""
+        playwright = None
+        
         if self.browser_type in ['chromium', 'chrome', 'msedge']:
             self.playwright_instance = await async_playwright().start()
             playwright = self.playwright_instance
@@ -137,7 +143,13 @@ class TurnstileAPIServer:
                     browser = await playwright.chromium.launch(
                         channel=self.browser_type,
                         headless=self.headless,
-                        args=self.browser_args
+                        args=self.browser_args + [
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-accelerated-2d-canvas',
+                            '--disable-gpu'
+                        ]
                     )
                 elif self.browser_type == "camoufox":
                     browser = await self.camoufox_instance.start()
@@ -177,7 +189,7 @@ class TurnstileAPIServer:
                                 "password": proxy_pass
                             })
                         else:
-                            raise ValueError("Invalid proxy format")
+                            context = await browser.new_context()
                     else:
                         context = await browser.new_context()
                 else:
@@ -192,7 +204,7 @@ class TurnstileAPIServer:
             page = await context.new_page()
 
             if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
+                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url}")
 
             url_with_slash = url + "/" if not url.endswith("/") else url
             turnstile_div = f'<div class="cf-turnstile" style="background: white;" data-sitekey="{sitekey}"' \
@@ -211,7 +223,7 @@ class TurnstileAPIServer:
                 "cookies": []
             }
 
-            for attempt in range(15):  # More attempts for reliability
+            for attempt in range(20):
                 try:
                     turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
                     if turnstile_check == "":
@@ -225,11 +237,11 @@ class TurnstileAPIServer:
                     else:
                         elapsed_time = round(time.time() - start_time, 3)
 
-                        # Navigate to the actual URL to get cookies
                         try:
-                            await page.goto(url, wait_until="domcontentloaded")
+                            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
                         except:
                             pass
+                        
                         cookies = await context.cookies()
 
                         logger.success(
@@ -385,8 +397,8 @@ class TurnstileAPIServer:
 
                     <div class="bg-red-900 border-l-4 border-red-600 p-4">
                         <p class="text-red-200 font-semibold">Maintained by 
-                           <a href="https://t.me/atxxxchannel" class="text-red-300 hover:underline">ATX</a> 
-                           and <a href="t.me/AntraxdevZ" class="text-red-300 hover:underline">Antrax</a></p>
+                           <a href="https://github.com/Theyka" class="text-red-300 hover:underline">Theyka</a> 
+                           and <a href="https://github.com/sexfrance" class="text-red-300 hover:underline">Sexfrance</a></p>
                     </div>
                 </div>
             </body>
@@ -394,31 +406,7 @@ class TurnstileAPIServer:
         """
 
 
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Turnstile API Server")
-
-    parser.add_argument('--headless', type=lambda x: x.lower() == 'true', 
-                        default=os.getenv('HEADLESS', 'true').lower() == 'true')
-    parser.add_argument('--useragent', type=str, 
-                        default=os.getenv('USER_AGENT', None))
-    parser.add_argument('--debug', type=lambda x: x.lower() == 'true', 
-                        default=os.getenv('DEBUG', 'false').lower() == 'true')
-    parser.add_argument('--browser_type', type=str, 
-                        default=os.getenv('BROWSER_TYPE', 'chromium'))
-    parser.add_argument('--thread', type=int, 
-                        default=int(os.getenv('THREAD_COUNT', '3')))
-    parser.add_argument('--proxy', type=lambda x: x.lower() == 'true', 
-                        default=os.getenv('PROXY_SUPPORT', 'false').lower() == 'true')
-    parser.add_argument('--host', type=str, 
-                        default=os.getenv('HOST', '0.0.0.0'))
-    parser.add_argument('--port', type=str, 
-                        default=os.getenv('PORT', '5000'))
-    return parser.parse_args()
-
-
-# Create the app instance for Railway
-args = parse_args()
+# Create the app instance
 app = Quart(__name__)
 server = None
 
@@ -426,25 +414,36 @@ server = None
 @app.before_serving
 async def startup():
     global server
+    
+    headless = os.getenv('HEADLESS', 'true').lower() == 'true'
+    browser_type = os.getenv('BROWSER_TYPE', 'chromium')
+    thread_count = int(os.getenv('THREAD_COUNT', '3'))
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
+    useragent = os.getenv('USER_AGENT', None)
+    proxy_support = os.getenv('PROXY_SUPPORT', 'false').lower() == 'true'
+    
     browser_types = ['chromium', 'chrome', 'msedge', 'camoufox']
-    if args.browser_type not in browser_types:
-        logger.error(f"Unknown browser type: {args.browser_type}")
-        raise ValueError(f"Unknown browser type: {args.browser_type}")
+    if browser_type not in browser_types:
+        logger.error(f"Unknown browser type: {browser_type}")
+        raise ValueError(f"Unknown browser type: {browser_type}")
     
     server = TurnstileAPIServer(
-        headless=args.headless,
-        useragent=args.useragent,
-        debug=args.debug,
-        browser_type=args.browser_type,
-        thread=args.thread,
-        proxy_support=args.proxy
+        headless=headless,
+        useragent=useragent,
+        debug=debug,
+        browser_type=browser_type,
+        thread=thread_count,
+        proxy_support=proxy_support
     )
+    
     # Copy routes from server to app
     app.route('/turnstile', methods=['GET'])(server.process_turnstile)
     app.route('/')(server.index)
     app.route('/health', methods=['GET'])(server.health_check)
+    
     await server._startup()
 
 
 if __name__ == '__main__':
-    app.run(host=args.host, port=int(args.port))
+    port = int(os.getenv('PORT', '5000'))
+    app.run(host='0.0.0.0', port=port)
